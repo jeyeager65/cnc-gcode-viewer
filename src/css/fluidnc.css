@@ -1,0 +1,72 @@
+/* FluidNC-specific styles */
+
+/* File Browser */
+.file-browser {
+    max-height: 240px;
+    overflow-y: auto;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background-color: var(--canvas-bg);
+}
+
+.file-item {
+    padding: 6px;
+    border-bottom: 1px solid var(--border-color);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    transition: background-color 0.2s;
+}
+
+.file-item:hover {
+    background-color: var(--panel-bg);
+}
+
+.file-item.selected {
+    background-color: var(--cut-color);
+    color: white;
+}
+
+.file-icon {
+    font-size: 20px;
+}
+
+.file-info {
+    flex: 1;
+}
+
+.file-name {
+    font-weight: 600;
+    font-size: 14px;
+}
+
+.file-size {
+    font-size: 11px;
+    opacity: 0.7;
+}
+
+/* Breadcrumb Navigation */
+.breadcrumb {
+    display: flex;
+    gap: 5px;
+    padding: 8px;
+    background-color: var(--panel-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    margin-bottom: 10px;
+    font-size: 12px;
+}
+
+.breadcrumb-item {
+    cursor: pointer;
+    color: var(--cut-color);
+}
+
+.breadcrumb-item:hover {
+    text-decoration: underline;
+}
+
+.breadcrumb-separator {
+    opacity: 0.5;
+}

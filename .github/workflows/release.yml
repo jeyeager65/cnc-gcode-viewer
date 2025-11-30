@@ -1,0 +1,147 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
+      - name: Install Terser
+        run: npm install -g terser
+      
+      - name: Extract version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+      
+      - name: Run build script
+        shell: pwsh
+        run: ./build.ps1
+      
+      - name: Calculate file sizes
+        id: sizes
+        run: |
+          SOURCE_SIZE=$(du -sh src | cut -f1)
+          STANDALONE_SIZE=$(stat -c%s dist/standalone.html | numfmt --to=iec-i --suffix=B)
+          STANDALONE_GZ_SIZE=$(stat -c%s dist/standalone.html.gz | numfmt --to=iec-i --suffix=B)
+          FLUIDNC_SIZE=$(stat -c%s dist/gcodeviewer.html | numfmt --to=iec-i --suffix=B)
+          FLUIDNC_GZ_SIZE=$(stat -c%s dist/gcodeviewer.html.gz | numfmt --to=iec-i --suffix=B)
+          
+          echo "SOURCE_SIZE=${SOURCE_SIZE}" >> $GITHUB_OUTPUT
+          echo "STANDALONE_SIZE=${STANDALONE_SIZE}" >> $GITHUB_OUTPUT
+          echo "STANDALONE_GZ_SIZE=${STANDALONE_GZ_SIZE}" >> $GITHUB_OUTPUT
+          echo "FLUIDNC_SIZE=${FLUIDNC_SIZE}" >> $GITHUB_OUTPUT
+          echo "FLUIDNC_GZ_SIZE=${FLUIDNC_GZ_SIZE}" >> $GITHUB_OUTPUT
+          
+          echo "File Sizes:"
+          echo "  Source: ${SOURCE_SIZE}"
+          echo "  Standalone: ${STANDALONE_SIZE} (${STANDALONE_GZ_SIZE} gzipped)"
+          echo "  FluidNC: ${FLUIDNC_SIZE} (${FLUIDNC_GZ_SIZE} gzipped)"
+      
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get previous tag
+          PREV_TAG=$(git describe --abbrev=0 --tags $(git rev-list --tags --skip=1 --max-count=1) 2>/dev/null || echo "")
+          
+          if [ -z "$PREV_TAG" ]; then
+            echo "First release"
+            CHANGELOG="Initial release of CNC GCode Viewer"
+          else
+            echo "Generating changelog from ${PREV_TAG} to ${GITHUB_REF_NAME}"
+            
+            # Generate changelog with categorized commits
+            CHANGELOG="## Changes\n\n"
+            
+            # Features
+            FEATURES=$(git log ${PREV_TAG}..HEAD --pretty=format:"- %s" --grep="^feat:" | sed 's/^feat: //')
+            if [ ! -z "$FEATURES" ]; then
+              CHANGELOG="${CHANGELOG}### Features\n${FEATURES}\n\n"
+            fi
+            
+            # Fixes
+            FIXES=$(git log ${PREV_TAG}..HEAD --pretty=format:"- %s" --grep="^fix:" | sed 's/^fix: //')
+            if [ ! -z "$FIXES" ]; then
+              CHANGELOG="${CHANGELOG}### Bug Fixes\n${FIXES}\n\n"
+            fi
+            
+            # Other changes
+            OTHERS=$(git log ${PREV_TAG}..HEAD --pretty=format:"- %s" --grep="^feat:" --grep="^fix:" --invert-grep)
+            if [ ! -z "$OTHERS" ]; then
+              CHANGELOG="${CHANGELOG}### Other Changes\n${OTHERS}\n\n"
+            fi
+          fi
+          
+          # Save to file
+          echo -e "$CHANGELOG" > dist/CHANGELOG.md
+          
+          # Export for release notes
+          echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
+          cname: false
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            dist/standalone.html
+            dist/standalone.html.gz
+            dist/gcodeviewer.html
+            dist/gcodeviewer.html.gz
+            dist/CHANGELOG.md
+          body: |
+            # CNC GCode Viewer ${{ steps.version.outputs.VERSION }}
+            
+            ${{ steps.changelog.outputs.CHANGELOG }}
+            
+            ## File Sizes
+            - **Source**: ${{ steps.sizes.outputs.SOURCE_SIZE }}
+            - **Standalone**: ${{ steps.sizes.outputs.STANDALONE_SIZE }} (${{ steps.sizes.outputs.STANDALONE_GZ_SIZE }} gzipped)
+            - **FluidNC**: ${{ steps.sizes.outputs.FLUIDNC_SIZE }} (${{ steps.sizes.outputs.FLUIDNC_GZ_SIZE }} gzipped)
+            
+            ## Deployment Instructions
+
+            ## Hosted Version
+            Try it online: [CNC GCode Viewer](https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/)
+            
+            ### For FluidNC WebUI v3:
+            1. Download `gcodeviewer.html.gz`
+            2. Upload to Flash on your device via web interface or:
+               ```bash
+               curl -F "file=@gcodeviewer.html.gz" http://your-device-ip/files
+               ```
+            3. Add extension via WebUI: Settings -> ESP3D Interface -> Extra content
+               - Output - Panel (for Dashboard) or Page
+               - URL address - gcodeviewer.html
+               - Type - Extension
+               - Refresh time - 0
+            
+            ### For local use:
+            1. Download `standalone.html`
+            2. Open directly in a modern browser
+            3. No server required - runs completely offline            
+            
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

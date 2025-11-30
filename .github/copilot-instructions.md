@@ -1,0 +1,255 @@
+# CNC GCode Viewer - AI Coding Agent Instructions
+
+## Project Overview
+A lightweight, zero-dependency web-based CNC GCode viewer with 2D/3D visualization. Built as **pure vanilla JavaScript** with no frameworks or external libraries. Two versions: **standalone** (local file viewing) and **FluidNC** (embedded ESP32/FluidNC integration with SD card browser).
+
+**Critical constraint:** Total uncompressed size must stay under **135KB** (~45KB gzipped). Currently at ~133KB.
+
+## Architecture
+
+### Module Structure (ES6 Classes)
+All classes are **globally scoped** (no modules/imports) for single-file HTML inlining:
+
+- **`GCodeParser`** (`parser.js`) - Streaming parser with modal state tracking, adaptive arc tessellation
+- **`Camera`** (`camera.js`) - View/projection matrix calculations, pan/zoom/rotate transforms
+- **`Renderer2D`** (`renderer2d.js`) - Canvas 2D rendering with grid, coordinate display
+- **`Renderer3D`** (`renderer3d.js`) - WebGL renderer with depth testing, custom shaders
+- **`Animator`** (`animator.js`) - Frame-by-frame playback with speed control
+- **`Controller`** (`controller.js`) - Main application logic, event handling, tool/layer state
+- **`FluidNCAPI`** (`fluidnc-api.js`) - REST API client for FluidNC devices
+- **`FluidNCController`** (`fluidnc-controller.js`) - Extends `Controller` for SD card browser
+
+**Data flow:** File → `GCodeParser` → segments array → `Controller` → `Renderer2D`/`Renderer3D` → Canvas
+
+### Build System (`build.ps1`)
+PowerShell script that:
+1. Inlines CSS (`common.css`, `fluidnc.css`) into HTML `<style>` tags
+2. Concatenates all JS files in correct dependency order
+3. Minifies JS with Terser (3 compression passes)
+4. Removes HTML comments/whitespace
+5. Creates `.gz` files for embedded deployment
+6. Outputs: `dist/standalone.html` and `dist/gcodeviewer.html`
+
+**Run build:** `.\build.ps1` (requires `terser` npm package globally)
+
+## Key Development Patterns
+
+### 1. Streaming Parser Architecture
+GCode files are parsed in **50KB chunks** to handle large files without freezing:
+```javascript
+// parser.js - Never load entire file into memory
+async parseFile(file, onProgress) {
+    const chunkSize = 50 * 1024; // 50KB chunks
+    while (offset < totalSize) {
+        const chunk = await this.readChunk(file, offset, chunkSize);
+        buffer += chunk;
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // Keep incomplete line
+        // Process complete lines...
+    }
+}
+```
+
+### 2. Modal State Tracking
+GCode parser maintains modal state (position, units, plane, tool) across lines:
+- Absolute (`G90`) vs relative (`G91`) positioning
+- Units: `mm` (`G21`) or `inches` (`G20`)
+- Plane selection: `XY` (`G17`), `ZX` (`G18`), `YZ` (`G19`)
+- Current tool number for multi-tool coloring
+
+### 3. Adaptive Arc Tessellation
+Arcs (`G2`/`G3`) are converted to line segments with segment count based on arc length and radius:
+```javascript
+// parser.js - More segments for larger/longer arcs
+const segmentLength = 1.0; // mm per segment
+const numSegments = Math.max(8, Math.ceil(arcLength / segmentLength));
+```
+
+### 4. Dual Renderer Pattern
+Both renderers share the same `Camera` instance for consistent view transforms:
+- **2D:** Canvas 2D context with manual matrix math for pan/zoom
+- **3D:** WebGL with MVP matrix uniform, depth testing enabled
+- Switch via `Controller.toggleView()` which swaps canvas visibility
+
+### 5. Tool Color Management
+Multi-tool jobs assign colors from predefined palette:
+```javascript
+// controller.js
+this.toolColors = ['#00ccff', '#00ff88', '#ff4dff', '#ffff00', ...];
+// Each tool gets checkbox + color picker in UI
+this.tools.set(toolNum, { visible: true, color: this.toolColors[index] });
+```
+
+### 6. Theming with CSS Custom Properties
+All colors defined in `:root[data-theme="light/dark"]` in `common.css`:
+```css
+:root[data-theme="light"] { --bg-color: #ffffff; --text-color: #333333; }
+:root[data-theme="dark"] { --bg-color: #1e1e1e; --text-color: #e0e0e0; }
+```
+Theme persisted in `localStorage`, applied to `<html data-theme="...">` attribute.
+
+## Critical Code Conventions
+
+### File Size Discipline
+**Every change must justify its bytes:**
+- Use ternary operators over if/else when shorter
+- Reuse variables instead of creating new ones
+- Inline small functions (< 3 lines) if called once
+- Avoid duplicate logic - extract to shared functions
+- Check build output sizes after every feature: `.\build.ps1`
+
+### No External Dependencies
+**Never use:**
+- npm packages (except build tools: `terser`)
+- CDN libraries (Three.js, jQuery, etc.)
+- Polyfills (target modern browsers only)
+- Web Workers (adds complexity for minimal benefit at this size)
+
+### WebGL Shader Conventions
+Shaders are **embedded as template strings** in `renderer3d.js`:
+```javascript
+const vertexShaderSource = `
+    attribute vec3 aPosition;
+    attribute vec3 aColor;
+    uniform mat4 uMVP;
+    varying vec3 vColor;
+    void main() { gl_Position = uMVP * vec4(aPosition, 1.0); vColor = aColor; }
+`;
+```
+Always enable depth testing: `gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL);`
+
+### Event Listener Patterns
+All event listeners set up in `Controller.setupEventListeners()`:
+- Use `addEventListener` (never inline `onclick=`)
+- Store drag state in controller properties (`isDragging`, `lastMouseX`, etc.)
+- Handle both mouse and touch events for mobile support
+- Clean up with `removeEventListener` if dynamically adding/removing
+
+### FluidNC Extension Pattern
+FluidNC version **extends** base Controller:
+```javascript
+class FluidNCController extends Controller {
+    constructor() {
+        super(); // Calls base constructor
+        this.fluidAPI = new FluidNCAPI();
+        this.setupFluidNCListeners(); // Add FluidNC-specific UI
+    }
+}
+```
+Instantiate `FluidNCController` instead of `Controller` in `fluidnc.html`.
+
+## Testing Workflow
+
+### Local Testing
+1. Edit files in `src/` directory (changes reflected immediately in browser)
+2. Open `src/index.html` or `src/fluidnc.html` directly in browser (no server needed for standalone)
+3. For FluidNC features, use local server: `python -m http.server 8000` or PowerShell's `Start-Process`
+
+### Build Testing
+```powershell
+.\build.ps1  # Creates dist/standalone.html and dist/gcodeviewer.html
+# Open dist files in browser to test minified version
+```
+
+### FluidNC Device Testing
+Create `localtest.ps1` (git-ignored) to automate upload:
+```powershell
+.\build.ps1
+curl -F "file=@dist/gcodeviewer.html.gz" http://YOUR-DEVICE-IP/files
+```
+
+### Manual Test Checklist
+- [ ] Load example files (`examples/simple_square.nc`, `circle_arc.nc`, `3d_toolpath.nc`)
+- [ ] Toggle 2D/3D view (double-check WebGL initialization in console)
+- [ ] Pan/zoom/rotate in both views
+- [ ] Play/pause animation, adjust speed, step forward/backward
+- [ ] Layer filter (min/max Z)
+- [ ] Tool visibility toggles, color pickers
+- [ ] Rapid move visibility toggle
+- [ ] Light/dark theme switch (verify localStorage persistence)
+- [ ] Screenshot export (Canvas 2D `toDataURL()` functionality)
+- [ ] Touch controls on mobile/tablet (pinch zoom, two-finger pan)
+
+## Common Tasks
+
+### Adding a GCode Command
+1. Add parsing logic to `GCodeParser.parseLine()` (modal state update)
+2. Generate segments in `processMotion()` or handle in modal state
+3. Update `Supported GCode Commands` table in `README.md`
+
+### Adding a UI Control
+1. Add HTML element to `src/index.html` or `src/fluidnc.html`
+2. Style in `src/css/common.css` (use CSS custom properties for colors)
+3. Add event listener in `Controller.setupEventListeners()`
+4. Update state and trigger re-render: `this.render()`
+
+### Optimizing File Size
+1. Run build and check sizes: `.\build.ps1`
+2. Look for:
+   - Duplicate code blocks (extract to functions)
+   - Long variable names in hot paths (shorten after testing)
+   - Unused functions or dead code
+   - Comments explaining obvious code (remove)
+3. Re-run build and verify size reduction
+4. Test functionality hasn't broken
+
+### Debugging Rendering Issues
+- **2D:** Check `renderer2d.js` transform math, verify `Camera.applyTransform2D()` calls
+- **3D:** Check WebGL errors: `gl.getError()`, verify buffer data with `console.log(positions)`
+- **Both:** Verify segments array format: `[{ from: {x,y,z}, to: {x,y,z}, type: 'G0'|'G1'|..., tool: N, line: N }]`
+- Enable WebGL Inspector browser extension for shader debugging
+
+## Integration Points
+
+### FluidNC REST API (`fluidnc-api.js`)
+Key endpoints used:
+- `GET /api/v1/system` - Device info, max travel dimensions
+- `GET /sdfiles?path=/` - List SD card files
+- `GET /sdfile?path=/foo.nc` - Download file content
+- `POST /api/v1/command` - Send GCode commands (e.g., run file)
+
+**Grid auto-sync:** `FluidNCController` calls `syncGridFromFluidNC()` on load to fetch max travel X/Y and populate grid width/height inputs.
+
+### GitHub Actions Release (`/.github/workflows/release.yml`)
+Automated on version tag push (`v*.*.*`):
+1. Checkout code
+2. Install Node.js + Terser
+3. Run `build.ps1` via PowerShell
+4. Create GitHub Release with `dist/*.html` and `dist/*.html.gz` as artifacts
+5. Deploy `dist/standalone.html` to GitHub Pages
+
+## Documentation Standards
+
+### Code Comments
+- **JSDoc for public methods:** Include `@param`, `@returns` types
+- **Inline comments:** Explain "why" (design decisions), not "what" (obvious code)
+- **Complex algorithms:** Reference external docs (e.g., "LinuxCNC arc tessellation")
+
+### README Updates
+When adding features, update:
+- `## Features` section (add ✅ item)
+- `## Usage Guide` section (explain controls)
+- `## Supported GCode Commands` table (if parser changed)
+- Screenshots if UI significantly changed
+
+### Commit Messages
+Use **Conventional Commits** format:
+- `feat: add G28 homing support`
+- `fix: correct arc tessellation for small radii`
+- `perf: optimize 2D rendering with dirty flags`
+- `docs: update build instructions`
+
+## Performance Considerations
+
+- **Parser:** Chunk-based streaming prevents UI freeze on large files (5MB+)
+- **Rendering:** Skip invisible segments (layer filter, tool visibility, animation index)
+- **Animation:** Use `requestAnimationFrame()` for smooth 60fps playback
+- **WebGL:** Batch geometry into single buffer upload per frame (avoid per-segment draw calls)
+- **Touch:** Debounce/throttle touch events to prevent frame drops on mobile
+
+## Known Limitations
+
+- **File size:** 5MB recommended max (browser memory constraints)
+- **WebGL support:** Falls back to 2D-only if WebGL unavailable
+- **Arc precision:** Tessellation granularity may show facets on extreme zoom
+- **GCode dialect:** Targets GRBL/LinuxCNC/FluidNC (may not support all variants)

@@ -1,0 +1,31 @@
+# Build output
+dist/
+*.min.js
+*.gz
+
+# Local test script
+localtest.ps1
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+npm-debug.log*
+
+# Temporary files
+*.tmp
+*.temp
+*~
+
+# Node (if used for build tools)
+node_modules/
+package-lock.json

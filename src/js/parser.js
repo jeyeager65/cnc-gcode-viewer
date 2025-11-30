@@ -1,0 +1,483 @@
+/**
+ * GCode Parser Module
+ * Streams and parses GCode files with modal state tracking and adaptive arc tessellation
+ */
+
+class GCodeParser {
+    constructor() {
+        this.reset();
+    }
+
+    reset() {
+        // Modal state
+        this.position = { x: 0, y: 0, z: 0 };
+        this.units = 'mm'; // mm or inches
+        this.absolute = true; // G90/G91
+        this.plane = 'XY'; // G17/G18/G19
+        this.feedRate = 0;
+        this.currentTool = 1; // Start at Tool 1 (Tool 0 = no tool)
+        
+        // Tool names extracted from comments
+        this.toolNames = [];
+        this.toolColors = []; // Custom colors for tools (hex format)
+        this.parsingToolList = false;
+        
+        // Output
+        this.segments = [];
+        this.bounds = {
+            minX: Infinity, maxX: -Infinity,
+            minY: Infinity, maxY: -Infinity,
+            minZ: Infinity, maxZ: -Infinity
+        };
+    }
+
+    /**
+     * Parse GCode file with progress callbacks
+     * @param {File} file - File object from input
+     * @param {Function} onProgress - Callback (percent)
+     * @returns {Promise<Array>} Array of segments
+     */
+    async parseFile(file, onProgress) {
+        this.reset();
+        
+        const chunkSize = 50 * 1024; // 50KB chunks
+        const totalSize = file.size;
+        let offset = 0;
+        let buffer = '';
+        let lineNum = 0;
+
+        while (offset < totalSize) {
+            const chunk = await this.readChunk(file, offset, chunkSize);
+            offset += chunk.length;
+            
+            // Add chunk to buffer and process complete lines
+            buffer += chunk;
+            const lines = buffer.split('\n');
+            
+            // Keep last incomplete line in buffer
+            buffer = lines.pop();
+            
+            // Process complete lines
+            for (const line of lines) {
+                lineNum++;
+                this.parseLine(line.trim(), lineNum);
+            }
+            
+            // Report progress
+            if (onProgress) {
+                onProgress(Math.min(100, (offset / totalSize) * 100));
+            }
+        }
+        
+        // Process remaining buffer
+        if (buffer.trim()) {
+            lineNum++;
+            this.parseLine(buffer.trim(), lineNum);
+        }
+        
+        return this.segments;
+    }
+
+    /**
+     * Read chunk from file
+     */
+    readChunk(file, offset, length) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            const blob = file.slice(offset, offset + length);
+            
+            reader.onload = (e) => resolve(e.target.result);
+            reader.onerror = reject;
+            reader.readAsText(blob);
+        });
+    }
+
+    /**
+     * Parse single line of GCode
+     */
+    parseLine(line, lineNum) {
+        // Check for tool list in comments
+        if (line.startsWith(';') || line.startsWith('(')) {
+            const comment = line.replace(/^[;(]/, '').replace(/\)$/, '').trim();
+            
+            // Check if we're starting the tool list
+            if (/required tools?:/i.test(comment)) {
+                this.parsingToolList = true;
+                return;
+            }
+            
+            // If we're in the tool list, capture tool names
+            if (this.parsingToolList) {
+                // Stop parsing tool list if we hit an empty comment or non-tool comment
+                if (!comment || comment.length === 0) {
+                    this.parsingToolList = false;
+                    return;
+                }
+                // Add tool name if it looks like a tool description
+                if (comment.length > 0 && !comment.toLowerCase().includes('required')) {
+                    // Extract hex color if present (format: #RRGGBB)
+                    const hexMatch = comment.match(/#([0-9A-Fa-f]{6})\b/);
+                    
+                    if (hexMatch) {
+                        this.toolColors.push('#' + hexMatch[1]);
+                        // Remove color from tool name
+                        const cleanName = comment.replace(/#[0-9A-Fa-f]{6}\b/, '').trim();
+                        this.toolNames.push(cleanName);
+                    } else {
+                        this.toolColors.push(null); // No custom color
+                        this.toolNames.push(comment);
+                    }
+                }
+                return;
+            }
+            return; // Skip other comment lines
+        }
+        
+        if (!line || line.startsWith('%')) {
+            return; // Skip empty lines and program boundaries
+        }
+        
+        // Check for M0 with "tool" in comment (manual tool change)
+        const originalLine = line;
+        const hasM0 = /M0\b/i.test(line);
+        const commentMatch = originalLine.match(/[;(](.*)$/);
+        const comment = commentMatch ? commentMatch[1].toLowerCase() : '';
+        
+        if (hasM0 && comment.includes('tool')) {
+            // Manual tool change detected - increment tool number
+            this.currentTool++;
+        }
+        
+        // Remove inline comments
+        line = line.replace(/\(.*?\)/g, '').replace(/;.*$/, '').trim();
+        if (!line) return;
+        
+        // Extract words (letter + number pairs)
+        const words = this.extractWords(line);
+        if (words.length === 0) return;
+        
+        // Process commands
+        let commandProcessed = false;
+        
+        for (const [letter, value] of words) {
+            switch (letter) {
+                case 'G':
+                    commandProcessed = this.processGCode(Math.floor(value), words, lineNum) || commandProcessed;
+                    break;
+                case 'M':
+                    this.processMCode(Math.floor(value), words, lineNum);
+                    break;
+                case 'T':
+                    this.currentTool = Math.floor(value);
+                    break;
+                case 'F':
+                    this.feedRate = value;
+                    break;
+            }
+        }
+    }
+
+    /**
+     * Extract word pairs from line
+     */
+    extractWords(line) {
+        const words = [];
+        const regex = /([A-Z])([+-]?\d+\.?\d*)/gi;
+        let match;
+        
+        while ((match = regex.exec(line)) !== null) {
+            words.push([match[1].toUpperCase(), parseFloat(match[2])]);
+        }
+        
+        return words;
+    }
+
+    /**
+     * Process M-code command
+     */
+    processMCode(code, words, lineNum) {
+        switch (code) {
+            case 6: // Tool change
+                // Tool number is typically set by T command before M6
+                // currentTool is already updated by T command
+                break;
+        }
+    }
+
+    /**
+     * Process G-code command
+     */
+    processGCode(code, words, lineNum) {
+        switch (code) {
+            case 0: // Rapid move
+                return this.linearMove(words, 'rapid', lineNum);
+            case 1: // Linear move
+                return this.linearMove(words, 'cut', lineNum);
+            case 2: // Clockwise arc
+                return this.arcMove(words, 'cw', lineNum);
+            case 3: // Counter-clockwise arc
+                return this.arcMove(words, 'ccw', lineNum);
+            case 17: // XY plane
+                this.plane = 'XY';
+                return false;
+            case 18: // ZX plane
+                this.plane = 'ZX';
+                return false;
+            case 19: // YZ plane
+                this.plane = 'YZ';
+                return false;
+            case 20: // Inches
+                this.units = 'inches';
+                return false;
+            case 21: // Millimeters
+                this.units = 'mm';
+                return false;
+            case 90: // Absolute positioning
+                this.absolute = true;
+                return false;
+            case 91: // Relative positioning
+                this.absolute = false;
+                return false;
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * Process linear move (G0/G1)
+     */
+    linearMove(words, type, lineNum) {
+        const target = this.extractTarget(words);
+        
+        if (target.x === this.position.x && 
+            target.y === this.position.y && 
+            target.z === this.position.z) {
+            return false; // No movement
+        }
+        
+        this.addSegment({
+            type,
+            start: { ...this.position },
+            end: { ...target },
+            feedRate: this.feedRate,
+            tool: this.currentTool,
+            lineNum
+        });
+        
+        this.position = target;
+        this.updateBounds(target);
+        return true;
+    }
+
+    /**
+     * Process arc move (G2/G3)
+     */
+    arcMove(words, direction, lineNum) {
+        const target = this.extractTarget(words);
+        const offset = this.extractOffset(words);
+        
+        if (!offset) {
+            console.error(`Arc command at line ${lineNum} missing I/J/K parameters`);
+            return false;
+        }
+        
+        // Calculate arc segments
+        const segments = this.tessellateArc(
+            this.position,
+            target,
+            offset,
+            direction === 'cw'
+        );
+        
+        // Add each segment
+        for (const seg of segments) {
+            this.addSegment({
+                type: 'cut',
+                start: seg.start,
+                end: seg.end,
+                feedRate: this.feedRate,
+                tool: this.currentTool,
+                lineNum
+            });
+            this.updateBounds(seg.end);
+        }
+        
+        this.position = target;
+        return segments.length > 0;
+    }
+
+    /**
+     * Extract target position from words
+     */
+    extractTarget(words) {
+        const target = { ...this.position };
+        
+        for (const [letter, value] of words) {
+            const actualValue = this.absolute ? value : this.position[letter.toLowerCase()] + value;
+            
+            switch (letter) {
+                case 'X':
+                    target.x = actualValue;
+                    break;
+                case 'Y':
+                    target.y = actualValue;
+                    break;
+                case 'Z':
+                    target.z = actualValue;
+                    break;
+            }
+        }
+        
+        return target;
+    }
+
+    /**
+     * Extract arc offset (I, J, K)
+     */
+    extractOffset(words) {
+        let offset = null;
+        
+        for (const [letter, value] of words) {
+            if (letter === 'I' || letter === 'J' || letter === 'K') {
+                if (!offset) offset = { i: 0, j: 0, k: 0 };
+                offset[letter.toLowerCase()] = value;
+            }
+        }
+        
+        return offset;
+    }
+
+    /**
+     * Tessellate arc into line segments with adaptive quality
+     */
+    tessellateArc(start, end, offset, clockwise) {
+        // Calculate center point based on plane
+        let centerX, centerY, startX, startY, endX, endY;
+        
+        if (this.plane === 'XY') {
+            centerX = start.x + offset.i;
+            centerY = start.y + offset.j;
+            startX = start.x;
+            startY = start.y;
+            endX = end.x;
+            endY = end.y;
+        } else if (this.plane === 'ZX') {
+            centerX = start.z + offset.k;
+            centerY = start.x + offset.i;
+            startX = start.z;
+            startY = start.x;
+            endX = end.z;
+            endY = end.x;
+        } else { // YZ
+            centerX = start.y + offset.j;
+            centerY = start.z + offset.k;
+            startX = start.y;
+            startY = start.z;
+            endX = end.y;
+            endY = end.z;
+        }
+        
+        // Calculate radius and angles
+        const radius = Math.sqrt(
+            Math.pow(startX - centerX, 2) + 
+            Math.pow(startY - centerY, 2)
+        );
+        
+        const startAngle = Math.atan2(startY - centerY, startX - centerX);
+        const endAngle = Math.atan2(endY - centerY, endX - centerX);
+        
+        // Calculate arc angle
+        let arcAngle = endAngle - startAngle;
+        if (clockwise) {
+            if (arcAngle >= 0) arcAngle -= 2 * Math.PI;
+        } else {
+            if (arcAngle <= 0) arcAngle += 2 * Math.PI;
+        }
+        
+        // Adaptive tessellation: more segments for larger arcs
+        const numSegments = Math.max(8, Math.min(64, 
+            Math.floor(Math.sqrt(radius) * Math.abs(arcAngle) * 4)
+        ));
+        
+        // Generate segments
+        const segments = [];
+        let prevPoint = { ...start };
+        
+        for (let i = 1; i <= numSegments; i++) {
+            const t = i / numSegments;
+            const angle = startAngle + arcAngle * t;
+            
+            const point = { ...start };
+            
+            if (this.plane === 'XY') {
+                point.x = centerX + radius * Math.cos(angle);
+                point.y = centerY + radius * Math.sin(angle);
+                point.z = start.z + (end.z - start.z) * t;
+            } else if (this.plane === 'ZX') {
+                point.z = centerX + radius * Math.cos(angle);
+                point.x = centerY + radius * Math.sin(angle);
+                point.y = start.y + (end.y - start.y) * t;
+            } else { // YZ
+                point.y = centerX + radius * Math.cos(angle);
+                point.z = centerY + radius * Math.sin(angle);
+                point.x = start.x + (end.x - start.x) * t;
+            }
+            
+            segments.push({
+                start: prevPoint,
+                end: point
+            });
+            
+            prevPoint = point;
+        }
+        
+        return segments;
+    }
+
+    /**
+     * Add segment to list
+     */
+    addSegment(segment) {
+        this.segments.push(segment);
+    }
+
+    /**
+     * Update bounding box
+     */
+    updateBounds(point) {
+        this.bounds.minX = Math.min(this.bounds.minX, point.x);
+        this.bounds.maxX = Math.max(this.bounds.maxX, point.x);
+        this.bounds.minY = Math.min(this.bounds.minY, point.y);
+        this.bounds.maxY = Math.max(this.bounds.maxY, point.y);
+        this.bounds.minZ = Math.min(this.bounds.minZ, point.z);
+        this.bounds.maxZ = Math.max(this.bounds.maxZ, point.z);
+    }
+
+    /**
+     * Get bounds
+     */
+    getBounds() {
+        return this.bounds;
+    }
+
+    /**
+     * Get segments
+     */
+    getSegments() {
+        return this.segments;
+    }
+
+    /**
+     * Get tool names
+     */
+    getToolNames() {
+        return this.toolNames;
+    }
+
+    /**
+     * Get tool colors
+     */
+    getToolColors() {
+        return this.toolColors;
+    }
+}
