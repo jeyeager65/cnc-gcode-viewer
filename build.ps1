@@ -194,3 +194,6 @@ foreach ($build in $builds) {
 
 Write-Host "`nAll builds completed successfully!" -ForegroundColor Green
 
+# Create .nojekyll file for GitHub Pages
+Write-Host "Creating .nojekyll file..." -ForegroundColor Cyan
+New-Item -Path "dist/.nojekyll" -ItemType File -Force | Out-Null
