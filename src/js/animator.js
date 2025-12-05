@@ -7,13 +7,43 @@ class Animator {
     constructor() {
         this.segments = [];
         this.currentIndex = 0;
+        this.segmentProgress = 0; // 0-1 progress within current segment
         this.isPlaying = false;
         this.speed = 1.0;
         this.lastTime = 0;
         this.accumulatedTime = 0;
         this.estimatedTotalTime = 0;
+        this.toolTimes = new Map(); // Per-tool time estimates in seconds
+        
+        // Machine settings for time estimation
+        this.rapidSpeed = 3000; // mm/min - default/fallback
+        this.maxRateX = 3000; // mm/min - per-axis rapid speeds
+        this.maxRateY = 3000; // mm/min
+        this.maxRateZ = 2000; // mm/min
+        this.accelX = 200; // mm/s²
+        this.accelY = 200; // mm/s²
+        this.accelZ = 80;  // mm/s²
+        this.manualToolChangeTime = 30; // seconds for M0 tool changes
+        this.autoToolChangeTime = 10;   // seconds for M6 tool changes
         
         this.onUpdate = null; // Callback when index changes
+    }
+
+    /**
+     * Set machine motion parameters
+     */
+    setMotionParameters(params) {
+        if (params.accelX !== undefined) this.accelX = params.accelX;
+        if (params.accelY !== undefined) this.accelY = params.accelY;
+        if (params.accelZ !== undefined) this.accelZ = params.accelZ;
+        if (params.maxRateX !== undefined) this.maxRateX = params.maxRateX;
+        if (params.maxRateY !== undefined) this.maxRateY = params.maxRateY;
+        if (params.maxRateZ !== undefined) this.maxRateZ = params.maxRateZ;
+        
+        console.log('[Animator] Motion parameters updated:', {
+            accel: { X: this.accelX, Y: this.accelY, Z: this.accelZ },
+            maxRate: { X: this.maxRateX, Y: this.maxRateY, Z: this.maxRateZ }
+        });
     }
 
     /**
@@ -22,8 +52,36 @@ class Animator {
     setSegments(segments) {
         this.segments = segments;
         this.currentIndex = 0;
+        this.segmentProgress = 0;
         this.accumulatedTime = 0;
         this.calculateTotalTime();
+        this.calculateDistances();
+    }
+
+    /**
+     * Calculate cumulative distances for distance-based animation
+     */
+    calculateDistances() {
+        this.segmentDistances = [];
+        let totalDistance = 0;
+        
+        for (let i = 0; i < this.segments.length; i++) {
+            const seg = this.segments[i];
+            
+            // Only count cutting moves, skip rapid moves (they'll be instant)
+            if (seg.type === 'cut') {
+                const dx = seg.end.x - seg.start.x;
+                const dy = seg.end.y - seg.start.y;
+                const dz = seg.end.z - seg.start.z;
+                const distance = Math.sqrt(dx*dx + dy*dy + dz*dz);
+                
+                totalDistance += distance;
+            }
+            
+            this.segmentDistances.push(totalDistance);
+        }
+        
+        this.totalDistance = totalDistance;
     }
 
     /**
@@ -31,35 +89,222 @@ class Animator {
      */
     calculateTotalTime() {
         this.estimatedTotalTime = 0;
+        this.toolTimes.clear();
         
-        for (const seg of this.segments) {
+        for (let i = 0; i < this.segments.length; i++) {
+            const seg = this.segments[i];
+            const prevSeg = i > 0 ? this.segments[i - 1] : null;
+            const nextSeg = i < this.segments.length - 1 ? this.segments[i + 1] : null;
+            
+            let segmentTime = 0;
+            
+            // Add tool change time if this segment has a tool change
+            if (seg.toolChangeType === 'M0') {
+                segmentTime += this.manualToolChangeTime;
+            } else if (seg.toolChangeType === 'M6') {
+                segmentTime += this.autoToolChangeTime;
+            }
+            
+            // Calculate move time based on type with junction velocities
             if (seg.type === 'cut' && seg.feedRate > 0) {
-                const distance = Math.sqrt(
-                    Math.pow(seg.end.x - seg.start.x, 2) +
-                    Math.pow(seg.end.y - seg.start.y, 2) +
-                    Math.pow(seg.end.z - seg.start.z, 2)
-                );
+                const feedRate = seg.feedRate;
+                const prevFeedRate = prevSeg && prevSeg.type === 'cut' ? prevSeg.feedRate : 0;
+                const nextFeedRate = nextSeg && nextSeg.type === 'cut' ? nextSeg.feedRate : 0;
                 
-                // Time in minutes
-                this.estimatedTotalTime += distance / seg.feedRate;
+                const entryVel = this.calculateJunctionVelocity(prevSeg, seg, prevFeedRate, feedRate);
+                const exitVel = this.calculateJunctionVelocity(seg, nextSeg, feedRate, nextFeedRate);
+                
+                segmentTime += this.calculateMoveTime(seg, feedRate, entryVel, exitVel);
+            } else if (seg.type === 'rapid') {
+                // Calculate rapid feedrate based on move direction and per-axis limits
+                const dx = seg.end.x - seg.start.x;
+                const dy = seg.end.y - seg.start.y;
+                const dz = seg.end.z - seg.start.z;
+                const distance = Math.sqrt(dx*dx + dy*dy + dz*dz);
+                
+                if (distance > 0) {
+                    // Calculate the maximum feedrate for this move based on axis limits
+                    let rapidFeedRate = Infinity;
+                    
+                    if (Math.abs(dx) > 0.001) {
+                        const timeX = Math.abs(dx) / (this.maxRateX / 60);
+                        const requiredFeedRate = (distance / timeX) * 60;
+                        rapidFeedRate = Math.min(rapidFeedRate, requiredFeedRate);
+                    }
+                    if (Math.abs(dy) > 0.001) {
+                        const timeY = Math.abs(dy) / (this.maxRateY / 60);
+                        const requiredFeedRate = (distance / timeY) * 60;
+                        rapidFeedRate = Math.min(rapidFeedRate, requiredFeedRate);
+                    }
+                    if (Math.abs(dz) > 0.001) {
+                        const timeZ = Math.abs(dz) / (this.maxRateZ / 60);
+                        const requiredFeedRate = (distance / timeZ) * 60;
+                        rapidFeedRate = Math.min(rapidFeedRate, requiredFeedRate);
+                    }
+                    
+                    if (rapidFeedRate === Infinity) {
+                        rapidFeedRate = this.rapidSpeed;
+                    }
+                    
+                    const prevIsRapid = prevSeg && prevSeg.type === 'rapid';
+                    const nextIsRapid = nextSeg && nextSeg.type === 'rapid';
+                    
+                    const entryVel = prevIsRapid ? this.calculateJunctionVelocity(prevSeg, seg, rapidFeedRate, rapidFeedRate) : 0;
+                    const exitVel = nextIsRapid ? this.calculateJunctionVelocity(seg, nextSeg, rapidFeedRate, rapidFeedRate) : 0;
+                    
+                    segmentTime += this.calculateMoveTime(seg, rapidFeedRate, entryVel, exitVel);
+                }
+            }
+            
+            this.estimatedTotalTime += segmentTime;
+            
+            // Track per-tool time (only for cutting moves)
+            if (seg.type === 'cut') {
+                const tool = seg.tool || 1;
+                const currentToolTime = this.toolTimes.get(tool) || 0;
+                this.toolTimes.set(tool, currentToolTime + segmentTime);
             }
         }
-        
-        // Convert to seconds
-        this.estimatedTotalTime *= 60;
     }
 
     /**
-     * Get formatted total time
+     * Calculate time for a move considering acceleration and entry/exit velocities
+     * Uses trapezoidal velocity profile with entry and exit velocities
      */
-    getFormattedTime() {
-        if (this.estimatedTotalTime === 0) {
+    calculateMoveTime(seg, feedRate, entryVelocity = 0, exitVelocity = 0) {
+        const dx = seg.end.x - seg.start.x;
+        const dy = seg.end.y - seg.start.y;
+        const dz = seg.end.z - seg.start.z;
+        
+        const distance = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        if (distance === 0) return 0;
+        
+        // Target velocity in mm/s
+        const targetVelocity = feedRate / 60;
+        
+        // Calculate effective acceleration based on move direction
+        // Use the limiting (lowest) acceleration for the move
+        let effectiveAccel = Infinity;
+        
+        if (Math.abs(dx) > 0.001) {
+            const xAccel = this.accelX;
+            effectiveAccel = Math.min(effectiveAccel, xAccel);
+        }
+        if (Math.abs(dy) > 0.001) {
+            const yAccel = this.accelY;
+            effectiveAccel = Math.min(effectiveAccel, yAccel);
+        }
+        if (Math.abs(dz) > 0.001) {
+            const zAccel = this.accelZ;
+            effectiveAccel = Math.min(effectiveAccel, zAccel);
+        }
+        
+        // If no acceleration limit applies, use X/Y default
+        if (effectiveAccel === Infinity) {
+            effectiveAccel = this.accelX;
+        }
+        
+        // Clamp entry and exit velocities to target velocity
+        entryVelocity = Math.min(entryVelocity, targetVelocity);
+        exitVelocity = Math.min(exitVelocity, targetVelocity);
+        
+        // Distance to accelerate from entry to target
+        const accelDistance = (targetVelocity * targetVelocity - entryVelocity * entryVelocity) / (2 * effectiveAccel);
+        
+        // Distance to decelerate from target to exit
+        const decelDistance = (targetVelocity * targetVelocity - exitVelocity * exitVelocity) / (2 * effectiveAccel);
+        
+        const totalAccelDistance = accelDistance + decelDistance;
+        
+        if (totalAccelDistance >= distance) {
+            // Can't reach target velocity - calculate peak velocity
+            const peakVelocitySq = (entryVelocity * entryVelocity + exitVelocity * exitVelocity) / 2 + effectiveAccel * distance;
+            const peakVelocity = Math.sqrt(Math.max(0, peakVelocitySq));
+            
+            const accelTime = (peakVelocity - entryVelocity) / effectiveAccel;
+            const decelTime = (peakVelocity - exitVelocity) / effectiveAccel;
+            return accelTime + decelTime;
+        } else {
+            // Reaches target velocity
+            const accelTime = (targetVelocity - entryVelocity) / effectiveAccel;
+            const decelTime = (targetVelocity - exitVelocity) / effectiveAccel;
+            const constantVelocityDistance = distance - totalAccelDistance;
+            const constantVelocityTime = constantVelocityDistance / targetVelocity;
+            return accelTime + constantVelocityTime + decelTime;
+        }
+    }
+    
+    /**
+     * Calculate the safe junction velocity between two segments
+     * Based on angle between moves and acceleration limits
+     */
+    calculateJunctionVelocity(seg1, seg2, feedRate1, feedRate2) {
+        // Quick rejection checks first
+        if (!seg1 || !seg2) return 0;
+        if (seg1.tool !== seg2.tool || seg1.type !== seg2.type) return 0;
+        
+        // Check connection
+        const dx = seg1.end.x - seg2.start.x;
+        const dy = seg1.end.y - seg2.start.y;
+        const dz = seg1.end.z - seg2.start.z;
+        if ((dx*dx + dy*dy + dz*dz) >= 0.000001) return 0; // Not connected
+        
+        // Calculate direction vectors
+        const dx1 = seg1.end.x - seg1.start.x;
+        const dy1 = seg1.end.y - seg1.start.y;
+        const dz1 = seg1.end.z - seg1.start.z;
+        const len1Sq = dx1*dx1 + dy1*dy1 + dz1*dz1;
+        
+        const dx2 = seg2.end.x - seg2.start.x;
+        const dy2 = seg2.end.y - seg2.start.y;
+        const dz2 = seg2.end.z - seg2.start.z;
+        const len2Sq = dx2*dx2 + dy2*dy2 + dz2*dz2;
+        
+        if (len1Sq === 0 || len2Sq === 0) return 0;
+        
+        const len1 = Math.sqrt(len1Sq);
+        const len2 = Math.sqrt(len2Sq);
+        
+        // Normalize
+        const ux1 = dx1 / len1, uy1 = dy1 / len1, uz1 = dz1 / len1;
+        const ux2 = dx2 / len2, uy2 = dy2 / len2, uz2 = dz2 / len2;
+        
+        // Dot product gives cosine of angle
+        const cosAngle = ux1*ux2 + uy1*uy2 + uz1*uz2;
+        
+        // If moving in same direction (cosAngle near 1), can maintain full speed
+        if (cosAngle > 0.999) {
+            return Math.min(feedRate1, feedRate2) / 60; // Convert to mm/s
+        }
+        
+        // For other angles, calculate safe junction velocity
+        const angleFactor = (1 + cosAngle) / 2; // 0 at 180°, 1 at 0°
+        const targetVel = Math.min(feedRate1, feedRate2) / 60;
+        
+        return targetVel * angleFactor;
+    }
+
+
+    /**
+     * Calculate time for a move considering acceleration and entry/exit velocities
+     * Uses trapezoidal velocity profile with entry and exit velocities
+     */
+    /**
+     * Format time duration in seconds to human readable string
+     */
+    formatDuration(timeInSeconds) {
+        if (timeInSeconds === 0) {
             return '-';
         }
         
-        const minutes = Math.floor(this.estimatedTotalTime / 60);
-        const seconds = Math.floor(this.estimatedTotalTime % 60);
+        const totalSeconds = Math.floor(timeInSeconds);
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const seconds = totalSeconds % 60;
         
+        if (hours > 0) {
+            return `${hours}h ${minutes}m ${seconds}s`;
+        }
         if (minutes > 0) {
             return `${minutes}m ${seconds}s`;
         }
@@ -67,15 +312,35 @@ class Animator {
     }
 
     /**
+     * Get formatted total time
+     */
+    getFormattedTime() {
+        return this.formatDuration(this.estimatedTotalTime);
+    }
+    
+    /**
+     * Get formatted time for specific tool
+     */
+    getToolTime(toolNum) {
+        const time = this.toolTimes.get(toolNum) || 0;
+        return this.formatDuration(time);
+    }
+    
+    /**
+     * Get all tool times
+     */
+    getToolTimes() {
+        return this.toolTimes;
+    }
+
+    /**
+     * Get segment index at given time
+     */
+    /**
      * Start playback
      */
     play() {
         if (this.segments.length === 0) return;
-        
-        // Sync accumulated time with current index to resume from current position
-        if (this.estimatedTotalTime > 0) {
-            this.accumulatedTime = (this.currentIndex / this.segments.length) * this.estimatedTotalTime;
-        }
         
         this.isPlaying = true;
         this.lastTime = performance.now();
@@ -173,43 +438,122 @@ class Animator {
         const deltaTime = (currentTime - this.lastTime) / 1000; // Convert to seconds
         this.lastTime = currentTime;
         
-        // Calculate how many segments to advance
-        if (this.estimatedTotalTime > 0) {
-            // Time-based animation
-            this.accumulatedTime += deltaTime * this.speed;
+        // Distance-based animation for constant visual speed
+        if (this.totalDistance > 0) {
+            // Use a constant visual speed (adjust this to control animation speed)
+            const visualSpeed = 100 * this.speed; // mm/s visual speed (reduced from 500 for more reasonable animation speed)
+            const distanceToTravel = visualSpeed * deltaTime;
             
-            const progress = this.accumulatedTime / this.estimatedTotalTime;
-            const targetIndex = Math.floor(progress * this.segments.length);
+            this.accumulatedTime += distanceToTravel;
             
-            if (targetIndex !== this.currentIndex && targetIndex <= this.segments.length) {
-                this.currentIndex = targetIndex;
-                
-                if (this.onUpdate) {
-                    this.onUpdate(this.currentIndex);
+            // Find segment based on accumulated distance
+            const targetDistance = this.accumulatedTime;
+            let targetIndex = 0;
+            
+            // Binary search for efficiency
+            let left = 0;
+            let right = this.segmentDistances.length - 1;
+            
+            while (left < right) {
+                const mid = Math.floor((left + right) / 2);
+                if (this.segmentDistances[mid] < targetDistance) {
+                    left = mid + 1;
+                } else {
+                    right = mid;
                 }
             }
+            
+            targetIndex = left;
+            
+            // Calculate progress within the current segment
+            if (targetIndex < this.segments.length) {
+                const seg = this.segments[targetIndex];
+                const segStartDistance = targetIndex > 0 ? this.segmentDistances[targetIndex - 1] : 0;
+                const segEndDistance = this.segmentDistances[targetIndex];
+                const segTotalDistance = segEndDistance - segStartDistance;
+                
+                if (seg.type === 'cut' && segTotalDistance > 0) {
+                    // Calculate progress (0-1) within this segment
+                    const distanceIntoSegment = targetDistance - segStartDistance;
+                    this.segmentProgress = Math.min(1, Math.max(0, distanceIntoSegment / segTotalDistance));
+                } else {
+                    // Rapid moves or zero-distance moves are instant
+                    this.segmentProgress = 1;
+                }
+            } else {
+                this.segmentProgress = 1;
+            }
+            
+            const indexChanged = targetIndex !== this.currentIndex;
+            this.currentIndex = targetIndex;
+            
+            if (this.onUpdate) {
+                this.onUpdate(this.currentIndex, this.segmentProgress);
+            }
+            
+            // Check if finished
+            if (this.accumulatedTime >= this.totalDistance) {
+                this.currentIndex = this.segments.length;
+                this.segmentProgress = 1;
+                this.isPlaying = false;
+                
+                if (this.onUpdate) {
+                    this.onUpdate(this.currentIndex, 1);
+                }
+                return;
+            }
         } else {
-            // Line-based animation (fallback when no feed rates)
-            const linesPerSecond = 100 * this.speed;
-            const linesToAdvance = linesPerSecond * deltaTime;
-            
-            this.currentIndex += linesToAdvance;
-            
-            if (this.onUpdate) {
-                this.onUpdate(Math.floor(this.currentIndex));
+            // Fallback to time-based animation
+            if (this.estimatedTotalTime > 0) {
+                this.accumulatedTime += deltaTime * this.speed;
+                
+                const progress = this.accumulatedTime / this.estimatedTotalTime;
+                const targetIndex = Math.floor(progress * this.segments.length);
+                
+                if (targetIndex !== this.currentIndex && targetIndex <= this.segments.length) {
+                    this.currentIndex = targetIndex;
+                    this.segmentProgress = 1;
+                    
+                    if (this.onUpdate) {
+                        this.onUpdate(this.currentIndex, 1);
+                    }
+                }
+                
+                // Check if finished
+                if (this.currentIndex >= this.segments.length) {
+                    this.currentIndex = this.segments.length;
+                    this.segmentProgress = 1;
+                    this.isPlaying = false;
+                    
+                    if (this.onUpdate) {
+                        this.onUpdate(this.currentIndex, 1);
+                    }
+                    return;
+                }
+            } else {
+                // Line-based animation (fallback when no feed rates)
+                const linesPerSecond = 100 * this.speed;
+                const linesToAdvance = linesPerSecond * deltaTime;
+                
+                this.currentIndex += linesToAdvance;
+                this.segmentProgress = 1;
+                
+                if (this.onUpdate) {
+                    this.onUpdate(Math.floor(this.currentIndex), 1);
+                }
+                
+                // Check if finished
+                if (this.currentIndex >= this.segments.length) {
+                    this.currentIndex = this.segments.length;
+                    this.segmentProgress = 1;
+                    this.isPlaying = false;
+                    
+                    if (this.onUpdate) {
+                        this.onUpdate(this.currentIndex, 1);
+                    }
+                    return;
+                }
             }
-        }
-        
-        // Check if animation is complete
-        if (this.currentIndex >= this.segments.length) {
-            this.currentIndex = this.segments.length;
-            this.isPlaying = false;
-            
-            if (this.onUpdate) {
-                this.onUpdate(this.currentIndex);
-            }
-            
-            return;
         }
         
         requestAnimationFrame(() => this.animate());

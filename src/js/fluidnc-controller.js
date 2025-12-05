@@ -49,9 +49,10 @@ class FluidNCController extends Controller {
      */
     async syncGridFromFluidNC() {
         try {
-            const [width, height] = await Promise.all([
+            const [width, height, motionParams] = await Promise.all([
                 this.fluidAPI.getMaxTravelX(),
-                this.fluidAPI.getMaxTravelY()
+                this.fluidAPI.getMaxTravelY(),
+                this.fluidAPI.getMotionParameters()
             ]);
 
             const widthInput = document.getElementById('grid-width');
@@ -64,7 +65,11 @@ class FluidNCController extends Controller {
             widthInput.dispatchEvent(new Event('input', { bubbles: true }));
             heightInput.dispatchEvent(new Event('input', { bubbles: true }));
 
+            // Apply motion parameters to animator
+            this.animator.setMotionParameters(motionParams);
+
             console.log('Grid dimensions synced from FluidNC:', width, 'x', height);
+            console.log('Motion parameters synced from FluidNC:', motionParams);
         } catch (error) {
             console.error('Failed to sync grid dimensions:', error);
         }
@@ -263,6 +268,9 @@ class FluidNCController extends Controller {
             // Update renderers
             this.renderer2d.setSegments(segments, bounds);
             this.renderer3d.setSegments(segments, bounds);
+
+            // Update renderers with tool states (colors and visibility)
+            this.updateRenderers();
 
             // Update animator
             this.animator.setSegments(segments);

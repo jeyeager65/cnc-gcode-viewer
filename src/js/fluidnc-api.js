@@ -324,6 +324,73 @@ class FluidNCAPI {
     }
 
     /**
+     * Get machine motion parameters (acceleration and max rates)
+     */
+    async getMotionParameters() {
+        try {
+            const params = {
+                accelX: 200,
+                accelY: 200,
+                accelZ: 80,
+                maxRateX: 3000,
+                maxRateY: 3000,
+                maxRateZ: 2000
+            };
+
+            // Get acceleration values
+            try {
+                const accelXResp = await this.sendCommand('$/axes/x/acceleration_mm_per_sec2');
+                const accelXMatch = accelXResp.match(/=([^\r\n]+)/);
+                if (accelXMatch) params.accelX = parseFloat(accelXMatch[1].trim()) || 200;
+            } catch (e) { console.warn('Failed to get X acceleration:', e); }
+
+            try {
+                const accelYResp = await this.sendCommand('$/axes/y/acceleration_mm_per_sec2');
+                const accelYMatch = accelYResp.match(/=([^\r\n]+)/);
+                if (accelYMatch) params.accelY = parseFloat(accelYMatch[1].trim()) || 200;
+            } catch (e) { console.warn('Failed to get Y acceleration:', e); }
+
+            try {
+                const accelZResp = await this.sendCommand('$/axes/z/acceleration_mm_per_sec2');
+                const accelZMatch = accelZResp.match(/=([^\r\n]+)/);
+                if (accelZMatch) params.accelZ = parseFloat(accelZMatch[1].trim()) || 80;
+            } catch (e) { console.warn('Failed to get Z acceleration:', e); }
+
+            // Get max rate values
+            try {
+                const maxRateXResp = await this.sendCommand('$/axes/x/max_rate_mm_per_min');
+                const maxRateXMatch = maxRateXResp.match(/=([^\r\n]+)/);
+                if (maxRateXMatch) params.maxRateX = parseFloat(maxRateXMatch[1].trim()) || 3000;
+            } catch (e) { console.warn('Failed to get X max rate:', e); }
+
+            try {
+                const maxRateYResp = await this.sendCommand('$/axes/y/max_rate_mm_per_min');
+                const maxRateYMatch = maxRateYResp.match(/=([^\r\n]+)/);
+                if (maxRateYMatch) params.maxRateY = parseFloat(maxRateYMatch[1].trim()) || 3000;
+            } catch (e) { console.warn('Failed to get Y max rate:', e); }
+
+            try {
+                const maxRateZResp = await this.sendCommand('$/axes/z/max_rate_mm_per_min');
+                const maxRateZMatch = maxRateZResp.match(/=([^\r\n]+)/);
+                if (maxRateZMatch) params.maxRateZ = parseFloat(maxRateZMatch[1].trim()) || 2000;
+            } catch (e) { console.warn('Failed to get Z max rate:', e); }
+
+            console.log('[FluidNC API] Motion parameters:', params);
+            return params;
+        } catch (error) {
+            console.error('[FluidNC API] Failed to get motion parameters:', error);
+            return {
+                accelX: 200,
+                accelY: 200,
+                accelZ: 80,
+                maxRateX: 3000,
+                maxRateY: 3000,
+                maxRateZ: 2000
+            };
+        }
+    }
+
+    /**
      * List files on SD card
      */
     async listSDFiles(path = '/') {

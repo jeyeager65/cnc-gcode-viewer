@@ -71,8 +71,9 @@ class Renderer2D {
     /**
      * Set maximum segment index for animation
      */
-    setMaxSegmentIndex(index) {
+    setMaxSegmentIndex(index, segmentProgress = 1) {
         this.maxSegmentIndex = index;
+        this.segmentProgress = segmentProgress;
     }
 
     /**
@@ -219,6 +220,7 @@ class Renderer2D {
         // Group segments by type and tool for batched rendering
         const rapidSegments = [];
         const cutSegmentsByTool = {}; // { toolNum: [segments] }
+        let partialSegment = null;
         
         for (let i = 0; i < Math.min(this.segments.length, this.maxSegmentIndex); i++) {
             const seg = this.segments[i];
@@ -248,6 +250,17 @@ class Renderer2D {
             }
         }
         
+        // Handle partial segment (current segment being animated)
+        if (this.maxSegmentIndex < this.segments.length && this.segmentProgress > 0 && this.segmentProgress < 1) {
+            const seg = this.segments[this.maxSegmentIndex];
+            if (seg.type === 'cut' && seg.start.z >= this.layerFilter.min && seg.start.z <= this.layerFilter.max) {
+                const tool = seg.tool || 0;
+                if (!this.toolStates.has(tool) || this.toolStates.get(tool).visible) {
+                    partialSegment = { seg, tool };
+                }
+            }
+        }
+        
         // Draw rapid moves (if visible)
         if (this.rapidMovesVisible && rapidSegments.length > 0) {
             this.ctx.strokeStyle = this.rapidMoveColor;
@@ -272,6 +285,29 @@ class Renderer2D {
             }
             
             this.drawSegmentBatch(cutSegmentsByTool[tool]);
+        }
+        
+        // Draw partial segment
+        if (partialSegment) {
+            const { seg, tool } = partialSegment;
+            
+            // Set color for partial segment
+            if (this.toolStates.has(tool)) {
+                this.ctx.strokeStyle = this.toolStates.get(tool).color;
+            } else {
+                const toolIndex = tool % toolColors.length;
+                this.ctx.strokeStyle = toolColors[toolIndex];
+            }
+            
+            // Interpolate end point based on progress
+            const endX = seg.start.x + (seg.end.x - seg.start.x) * this.segmentProgress;
+            const endY = seg.start.y + (seg.end.y - seg.start.y) * this.segmentProgress;
+            const endZ = seg.start.z + (seg.end.z - seg.start.z) * this.segmentProgress;
+            
+            this.ctx.beginPath();
+            this.ctx.moveTo(seg.start.x, seg.start.y);
+            this.ctx.lineTo(endX, endY);
+            this.ctx.stroke();
         }
     }
 
@@ -300,7 +336,13 @@ class Renderer2D {
         const currentSeg = this.segments[this.maxSegmentIndex];
         if (!currentSeg) return;
         
-        const pos = currentSeg.start;
+        // Interpolate position based on segment progress
+        const progress = this.segmentProgress;
+        const pos = {
+            x: currentSeg.start.x + (currentSeg.end.x - currentSeg.start.x) * progress,
+            y: currentSeg.start.y + (currentSeg.end.y - currentSeg.start.y) * progress,
+            z: currentSeg.start.z + (currentSeg.end.z - currentSeg.start.z) * progress
+        };
         const zoom = this.camera.zoom2d;
         const radius = 5 / zoom;
         

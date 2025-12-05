@@ -15,12 +15,15 @@ class GCodeParser {
         this.absolute = true; // G90/G91
         this.plane = 'XY'; // G17/G18/G19
         this.feedRate = 0;
-        this.currentTool = 1; // Start at Tool 1 (Tool 0 = no tool)
+        this.currentTool = 1; // Start at Tool 1
         
         // Tool names extracted from comments
         this.toolNames = [];
         this.toolColors = []; // Custom colors for tools (hex format)
         this.parsingToolList = false;
+        this.inlineToolMap = new Map(); // Maps tool number to array of sequential indices for inline format
+        this.inlineToolOccurrence = new Map(); // Tracks which occurrence of each tool number we're on
+        this.lastToolChangeType = null; // 'M0' for manual, 'M6' for automatic, null for none
         
         // Output
         this.segments = [];
@@ -99,7 +102,44 @@ class GCodeParser {
         if (line.startsWith(';') || line.startsWith('(')) {
             const comment = line.replace(/^[;(]/, '').replace(/\)$/, '').trim();
             
-            // Check if we're starting the tool list
+            // Check for inline tool definition: (Tool N: tool name)
+            const inlineToolMatch = comment.match(/^Tool\s+(\d+)\s*:\s*(.+)$/i);
+            if (inlineToolMatch) {
+                // First inline tool - add "No Tool" at index 0 and reset currentTool
+                if (this.toolNames.length === 0) {
+                    this.toolNames.push('No Tool');
+                    this.toolColors.push(null);
+                    this.currentTool = 0; // Start at 0 for inline format
+                }
+                
+                const toolNum = parseInt(inlineToolMatch[1]);
+                const toolName = inlineToolMatch[2].trim();
+                
+                // Extract hex color if present (format: #RRGGBB)
+                const hexMatch = toolName.match(/#([0-9A-Fa-f]{6})\b/);
+                const cleanToolName = hexMatch ? toolName.replace(/#[0-9A-Fa-f]{6}\b/, '').trim() : toolName;
+                const color = hexMatch ? '#' + hexMatch[1] : null;
+                
+                // Track which sequential index this tool number maps to
+                if (!this.inlineToolMap.has(toolNum)) {
+                    this.inlineToolMap.set(toolNum, []);
+                }
+                
+                const occurrences = this.inlineToolMap.get(toolNum);
+                const sequentialIndex = this.toolNames.length; // Tool 0 is at index 0, so this starts at 1
+                occurrences.push(sequentialIndex);
+                
+                if (occurrences.length === 1) {
+                    this.toolNames.push(`Tool ${toolNum}: ${cleanToolName}`);
+                } else {
+                    this.toolNames.push(`Tool ${toolNum}: ${cleanToolName} (${occurrences.length})`);
+                }
+                this.toolColors.push(color);
+                
+                return;
+            }
+            
+            // Check if we're starting the tool list (Estlcam format)
             if (/required tools?:/i.test(comment)) {
                 this.parsingToolList = true;
                 return;
@@ -143,8 +183,10 @@ class GCodeParser {
         const comment = commentMatch ? commentMatch[1].toLowerCase() : '';
         
         if (hasM0 && comment.includes('tool')) {
-            // Manual tool change detected - increment tool number
+            // Manual tool change detected - increment tool number (Estlcam format)
+            // This happens BEFORE any segments on this line, so next segments use new tool
             this.currentTool++;
+            this.lastToolChangeType = 'M0';
         }
         
         // Remove inline comments
@@ -167,7 +209,22 @@ class GCodeParser {
                     this.processMCode(Math.floor(value), words, lineNum);
                     break;
                 case 'T':
-                    this.currentTool = Math.floor(value);
+                    const toolNum = Math.floor(value);
+                    
+                    // If using inline tool format, map tool number to sequential index
+                    if (this.inlineToolMap.size > 0 && this.inlineToolMap.has(toolNum)) {
+                        const occurrences = this.inlineToolMap.get(toolNum);
+                        
+                        // Track which occurrence of this tool number we're using
+                        const currentOccurrence = this.inlineToolOccurrence.get(toolNum) || 0;
+                        const occurrenceIndex = Math.min(currentOccurrence, occurrences.length - 1);
+                        
+                        this.currentTool = occurrences[occurrenceIndex];
+                        this.inlineToolOccurrence.set(toolNum, currentOccurrence + 1);
+                    } else {
+                        // Standard sequential tool numbering (Estlcam style)
+                        this.currentTool = toolNum;
+                    }
                     break;
                 case 'F':
                     this.feedRate = value;
@@ -199,6 +256,7 @@ class GCodeParser {
             case 6: // Tool change
                 // Tool number is typically set by T command before M6
                 // currentTool is already updated by T command
+                this.lastToolChangeType = 'M6';
                 break;
         }
     }
@@ -260,8 +318,12 @@ class GCodeParser {
             end: { ...target },
             feedRate: this.feedRate,
             tool: this.currentTool,
+            toolChangeType: this.lastToolChangeType,
             lineNum
         });
+        
+        // Clear tool change type after adding segment
+        this.lastToolChangeType = null;
         
         this.position = target;
         this.updateBounds(target);
@@ -484,5 +546,12 @@ class GCodeParser {
      */
     getToolColors() {
         return this.toolColors;
+    }
+    
+    /**
+     * Check if using inline tool format
+     */
+    get usingInlineToolFormat() {
+        return this.inlineToolMap.size > 0;
     }
 }

@@ -18,6 +18,10 @@
     --gcode-s-code: #008577;
     --gcode-f-code: #a65e3e;
     --gcode-coordinate: #6a8759;
+    --gcode-system: #cc7000;
+    --gcode-x-axis: #1976d2;
+    --gcode-y-axis: #388e3c;
+    --gcode-z-axis: #7b1fa2;
 }
 
 :root[data-theme="dark"] {
@@ -39,6 +43,35 @@
     --gcode-s-code: #80cbc4;
     --gcode-f-code: #ffab91;
     --gcode-coordinate: #8fd6a3;
+    --gcode-system: #ffb84d;
+    --gcode-x-axis: #42a5f5;
+    --gcode-y-axis: #66bb6a;
+    --gcode-z-axis: #ba68c8;
+}
+
+/* Scrollbar styling for dark mode */
+:root[data-theme="dark"] *::-webkit-scrollbar {
+    width: 16px;
+    height: 16px;
+}
+
+:root[data-theme="dark"] *::-webkit-scrollbar-track {
+    background: #2a2a2a;
+}
+
+:root[data-theme="dark"] *::-webkit-scrollbar-thumb {
+    background: #555555;
+    border-radius: 8px;
+    border: 3px solid #2a2a2a;
+}
+
+:root[data-theme="dark"] *::-webkit-scrollbar-thumb:hover {
+    background: #666666;
+}
+
+:root[data-theme="dark"] * {
+    scrollbar-width: auto;
+    scrollbar-color: #555555 #2a2a2a;
 }
 
 /* Base Styles */
@@ -285,11 +318,16 @@ canvas:active {
 }
 
 .gcode-line:hover {
-    background-color: rgba(255, 255, 255, 0.05);
+    background-color: rgba(255, 255, 255, 0.05) !important;
 }
 
 .gcode-line.highlight {
-    background-color: rgba(255, 193, 7, 0.2);
+    background-color: rgba(255, 193, 7, 0.3) !important;
+}
+
+.gcode-line-numbers .gcode-line.highlight {
+    border-left: 3px solid rgba(255, 193, 7, 0.8) !important;
+    padding-left: 2px !important;
 }
 
 /* GCode Syntax Highlighting */
@@ -300,6 +338,10 @@ canvas:active {
 .gcode-s-code { color: var(--gcode-s-code); }
 .gcode-f-code { color: var(--gcode-f-code); }
 .gcode-coordinate { color: var(--gcode-coordinate); }
+.gcode-system { color: var(--gcode-system); font-weight: bold; }
+.gcode-x-axis { color: var(--gcode-x-axis); font-weight: 500; }
+.gcode-y-axis { color: var(--gcode-y-axis); font-weight: 500; }
+.gcode-z-axis { color: var(--gcode-z-axis); font-weight: 500; }
 
 .gcode-hidden {
     display: none !important;

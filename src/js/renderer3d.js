@@ -173,8 +173,9 @@ class Renderer3D {
     /**
      * Set maximum segment index for animation
      */
-    setMaxSegmentIndex(index) {
+    setMaxSegmentIndex(index, segmentProgress = 1) {
         this.maxSegmentIndex = index;
+        this.segmentProgress = segmentProgress;
         this.updateBuffers();
     }
 
@@ -249,6 +250,54 @@ class Renderer3D {
             // End vertex
             positions.push(seg.end.x, seg.end.y, seg.end.z);
             colors.push(...color);
+        }
+        
+        // Handle partial segment (current segment being animated)
+        if (this.maxSegmentIndex < this.segments.length && this.segmentProgress > 0 && this.segmentProgress < 1) {
+            const seg = this.segments[this.maxSegmentIndex];
+            
+            // Check if segment should be rendered
+            if (seg.start.z >= this.layerFilter.min && seg.start.z <= this.layerFilter.max) {
+                // Skip rapid moves if not visible
+                if (seg.type !== 'rapid' || this.rapidMovesVisible) {
+                    const toolNum = seg.tool || 0;
+                    let shouldRender = true;
+                    
+                    // Skip if tool is hidden
+                    if (seg.type !== 'rapid' && this.toolStates.has(toolNum)) {
+                        shouldRender = this.toolStates.get(toolNum).visible;
+                    }
+                    
+                    if (shouldRender) {
+                        // Choose color
+                        let color;
+                        if (seg.type === 'rapid') {
+                            color = rapidColor;
+                        } else {
+                            if (this.toolStates.has(toolNum)) {
+                                const hexColor = this.toolStates.get(toolNum).color;
+                                color = this.hexToRgb(hexColor);
+                            } else {
+                                const toolIndex = toolNum % toolColors.length;
+                                color = toolColors[toolIndex];
+                            }
+                        }
+                        
+                        // Interpolate end point based on progress
+                        const endX = seg.start.x + (seg.end.x - seg.start.x) * this.segmentProgress;
+                        const endY = seg.start.y + (seg.end.y - seg.start.y) * this.segmentProgress;
+                        const endZ = seg.start.z + (seg.end.z - seg.start.z) * this.segmentProgress;
+                        
+                        // Start vertex
+                        positions.push(seg.start.x, seg.start.y, seg.start.z);
+                        colors.push(...color);
+                        
+                        // Partial end vertex
+                        positions.push(endX, endY, endZ);
+                        colors.push(...color);
+                    }
+                }
+            }
         }
         
         this.vertexCount = positions.length / 3;
@@ -473,7 +522,13 @@ class Renderer3D {
         if (!currentSeg) return;
         
         const gl = this.gl;
-        const center = currentSeg.start;
+        // Interpolate position based on segment progress
+        const progress = this.segmentProgress;
+        const center = {
+            x: currentSeg.start.x + (currentSeg.end.x - currentSeg.start.x) * progress,
+            y: currentSeg.start.y + (currentSeg.end.y - currentSeg.start.y) * progress,
+            z: currentSeg.start.z + (currentSeg.end.z - currentSeg.start.z) * progress
+        };
         const radius = 1.5; // Size of the sphere
         
         // Generate sphere geometry with normals for lighting

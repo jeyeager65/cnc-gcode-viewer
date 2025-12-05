@@ -600,9 +600,9 @@ class Controller {
      * Setup animator callbacks
      */
     setupAnimator() {
-        this.animator.onUpdate = (index) => {
-            this.renderer2d.setMaxSegmentIndex(index);
-            this.renderer3d.setMaxSegmentIndex(index);
+        this.animator.onUpdate = (index, segmentProgress = 1) => {
+            this.renderer2d.setMaxSegmentIndex(index, segmentProgress);
+            this.renderer3d.setMaxSegmentIndex(index, segmentProgress);
             
             document.getElementById('current-line').textContent = index;
             document.getElementById('line-slider').value = index;
@@ -820,14 +820,15 @@ class Controller {
         // Get tool names and custom colors from parser
         const toolNames = this.parser.getToolNames();
         const toolColors = this.parser.getToolColors();
+        const usingInlineFormat = this.parser.usingInlineToolFormat;
         
         // Initialize tool states
-        // Tool list is 0-indexed: toolNames[0] = Tool 1, toolNames[1] = Tool 2, etc.
+        // Estlcam: tool numbers 1-based, array 0-based, so tool-1 for index
+        // Inline: "No Tool" is tool 0 at index 0, other tools at indices 1, 2, 3...
         this.tools.clear();
         const sortedTools = Array.from(toolSet).sort((a, b) => a - b);
         for (const tool of sortedTools) {
-            // Map tool number to tool list index (Tool 1 -> index 0, Tool 2 -> index 1, etc.)
-            const toolIndex = tool - 1;
+            const toolIndex = usingInlineFormat ? tool : tool - 1; // Inline uses direct index, Estlcam uses tool-1
             const customColor = toolColors[toolIndex];
             const colorIndex = tool % this.toolColors.length;
             const defaultColor = this.toolColors[colorIndex];
@@ -835,7 +836,7 @@ class Controller {
             this.tools.set(tool, {
                 visible: true,
                 color: customColor || defaultColor,
-                name: toolNames[toolIndex] || null
+                name: toolNames[toolIndex] || `Tool ${tool}`
             });
         }
     }
@@ -877,15 +878,26 @@ class Controller {
                 this.updateRenderers();
             };
             
-            // Tool label
-            const label = document.createElement('span');
+            // Tool label with estimated time
+            const infoDiv = document.createElement('div');
+            infoDiv.style.cssText = 'flex: 1; display: flex; flex-direction: column; gap: 2px;';
+            
+            const nameSpan = document.createElement('span');
             const toolName = toolState.name ? `Tool ${toolNum} - ${toolState.name}` : `Tool ${toolNum}`;
-            label.textContent = toolName;
-            label.style.cssText = 'flex: 1; font-size: 13px;';;
+            nameSpan.textContent = toolName;
+            nameSpan.style.cssText = 'font-size: 13px;';
+            
+            const timeSpan = document.createElement('span');
+            const toolTime = this.animator.getToolTime(toolNum);
+            timeSpan.textContent = `Est. Time: ${toolTime}`;
+            timeSpan.style.cssText = 'font-size: 11px; opacity: 0.7;';
+            
+            infoDiv.appendChild(nameSpan);
+            infoDiv.appendChild(timeSpan);
             
             toolDiv.appendChild(checkbox);
             toolDiv.appendChild(colorPicker);
-            toolDiv.appendChild(label);
+            toolDiv.appendChild(infoDiv);
             toolList.appendChild(toolDiv);
         }
     }
@@ -1104,23 +1116,29 @@ class Controller {
             
             let code = part.text;
             
+            // Highlight system commands ($ at start of word)
+            code = code.replace(/\$([A-Za-z0-9\/=]+)/g, '<span class="gcode-system">$$$1</span>');
+            
             // Highlight G-codes
             code = code.replace(/\b([GM])(\d+(\.\d+)?)/gi, (match, letter, number) => {
                 const className = letter.toUpperCase() === 'G' ? 'gcode-g-code' : 'gcode-m-code';
                 return `<span class="${className}">${letter}${number}</span>`;
             });
             
-            // Highlight T-codes (tool changes)
+            // Highlight T-codes (tool changes) - no word boundary needed after letter
             code = code.replace(/\b(T)(\d+)/gi, '<span class="gcode-t-code">$1$2</span>');
             
-            // Highlight S-codes (spindle speed)
+            // Highlight S-codes (spindle speed) - no word boundary needed after letter
             code = code.replace(/\b(S)(\d+(\.\d+)?)/gi, '<span class="gcode-s-code">$1$2</span>');
             
-            // Highlight F-codes (feed rate)
-            code = code.replace(/\b(F)(\d+(\.\d+)?)/gi, '<span class="gcode-f-code">$1$2</span>');
+            // Highlight coordinates - X, Y, Z get their own colors, others use generic coordinate color
+            code = code.replace(/([X])([-+]?\d+(\.\d+)?)/gi, '<span class="gcode-x-axis">$1$2</span>');
+            code = code.replace(/([Y])([-+]?\d+(\.\d+)?)/gi, '<span class="gcode-y-axis">$1$2</span>');
+            code = code.replace(/([Z])([-+]?\d+(\.\d+)?)/gi, '<span class="gcode-z-axis">$1$2</span>');
+            code = code.replace(/([ABCIJK])([-+]?\d+(\.\d+)?)/gi, '<span class="gcode-coordinate">$1$2</span>');
             
-            // Highlight coordinates (X, Y, Z, A, B, C, I, J, K)
-            code = code.replace(/\b([XYZABCIJK])([-+]?\d+(\.\d+)?)/gi, '<span class="gcode-coordinate">$1$2</span>');
+            // Highlight F-codes (feed rate) - must come after coordinates since F can follow them without space
+            code = code.replace(/([F])(\d+(\.\d+)?)/gi, '<span class="gcode-f-code">$1$2</span>');
             
             return code;
         }).join('');
